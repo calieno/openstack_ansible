@@ -1,0 +1,42 @@
+---
+- name: "3.1. Permitir Bind de IP não local (Kernel)"
+  sysctl:
+    name: net.ipv4.ip_nonlocal_bind
+    value: '1'
+    state: present
+    reload: yes
+
+- name: "3.2. Instalar Keepalived e psmisc (para killall)"
+  apt:
+    name: [keepalived, psmisc]
+    state: present
+
+- name: "3.3. Configurar Keepalived (VIPs Dinâmicas)"
+  template:
+    src: keepalived.conf.j2
+    dest: /etc/keepalived/keepalived.conf
+  notify: reiniciar keepalived
+
+- name: "3.4. Garantir que o serviço está rodando"
+  service:
+    name: keepalived
+    state: started
+    enabled: yes
+
+- name: "3.5. Aguardar presença do VIP (Máximo 30s)"
+  wait_for:
+    timeout: 30
+  delegate_to: localhost
+  become: no
+
+- name: "3.6. TESTE: Validar se as VIPs subiram"
+  shell: "ip -br addr show | grep .85"
+  register: vip_check
+  changed_when: false
+  failed_when: 
+    - inventory_hostname == cluster_leader 
+    - vip_check.stdout == ""
+
+- name: "Status das VIPs no Nó {{ inventory_hostname }}"
+  debug:
+    msg: "{{ vip_check.stdout_lines }}"

@@ -1,0 +1,27 @@
+all_control:
+  hosts:
+    mab:
+      ansible_host: 10.25.41.44
+      host_ip_cluster: 192.168.132.44
+      host_ip_iscsi01: 192.168.130.24
+      host_ip_iscsi02: 192.168.130.44
+      iface_10g_p1: enp4s0f0
+      iface_10g_p2: enp4s0f1
+    margaret:
+      ansible_host: 10.25.41.45
+      host_ip_cluster: 192.168.132.45
+      host_ip_iscsi01: 192.168.130.25
+      host_ip_iscsi02: 192.168.130.45
+      iface_10g_p1: enp4s0f0
+      iface_10g_p2: enp4s0f1
+    stephano:
+      ansible_host: 10.25.41.46
+      host_ip_cluster: 192.168.132.46
+      host_ip_iscsi01: 192.168.130.26
+      host_ip_iscsi02: 192.168.130.46
+      iface_10g_p1: enp4s0f0
+      iface_10g_p2: enp4s0f1
+  vars:
+    ansible_user: administrator
+    ansible_python_interpreter: /usr/bin/python3
+    physical_iface_mgmt: mgmt

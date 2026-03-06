@@ -1,0 +1,18 @@
+defaults {
+    user_friendly_names yes
+    find_multipaths yes
+}
+
+devices {
+    device {
+        vendor "EQLOGIC"
+        product "Standard"
+        path_grouping_policy "group_by_prio"
+        path_selector "service-time 0"
+        failback immediate
+        path_checker "tur"
+        hardware_handler "1 alua"
+        prio "alua"
+        features "1 queue_if_no_path"
+    }
+}

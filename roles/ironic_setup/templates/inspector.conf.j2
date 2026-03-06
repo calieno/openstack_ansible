@@ -1,0 +1,33 @@
+[DEFAULT]
+debug = True
+transport_url = rabbit://openstack:{{ rabbitmq_password }}@{{ keepalived_vip }}:5672//
+
+[database]
+connection = postgresql+psycopg2://ironic:{{ ironic_db_password }}@{{ keepalived_vip }}/ironic_inspector
+
+[keystone_authtoken]
+auth_url = http://\{\{ keepalived_vip }}:5000/v3
+auth_type = password
+project_domain_name = Default
+user_domain_name = Default
+project_name = service
+username = ironic
+password = {{ ironic_keystone_password }}
+
+[ironic]
+auth_url = http://\{\{ keepalived_vip }}:5000/v3
+auth_type = password
+project_domain_name = Default
+user_domain_name = Default
+project_name = service
+username = ironic
+password = {{ ironic_keystone_password }}
+
+[inspector]
+# Usando a interface de gerência definida no seu all.yml
+dnsmasq_interface = {{ management_iface }}
+ramdisk_logs_dir = /var/log/ironic-inspector/ramdisk
+
+[pxe]
+# Garante que o Inspector saiba onde está o servidor de boot
+listen_address = {{ keepalived_vip }}

@@ -1,0 +1,64 @@
+---
+- name: "4.1. Instalar pacotes MariaDB, Python MySQL e RabbitMQ"
+  apt:
+    name: [mariadb-server, python3-pymysql, python3-mysqldb, rabbitmq-server]
+    state: present
+    update_cache: yes
+
+- name: "4.2. Configurar MariaDB (Otimizações OpenStack)"
+  template:
+    src: openstack.cnf.j2
+    dest: /etc/mysql/mariadb.conf.d/99-openstack.cnf
+  register: mariadb_conf
+
+- name: "4.3. Reiniciar MariaDB"
+  service:
+    name: mariadb
+    state: restarted
+  when: mariadb_conf.changed
+
+- name: "4.4.1. Configurar arquivo de credenciais root (/root/.my.cnf)"
+  copy:
+    dest: /root/.my.cnf
+    content: |
+      [client]
+      user=root
+      password={{ mysql_root_password }}
+    mode: '0600'
+    owner: root
+    group: root
+
+- name: "4.4.2. Configurar senha root e permissões de acesso remoto"
+  mysql_user:
+    name: root
+    password: "{{ mysql_root_password }}"
+    host: "{{ item }}"
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+    check_implicit_admin: yes
+    state: present
+  loop:
+    - "localhost"
+    - "127.0.0.1"
+    - "::1"
+    - "{{ inventory_hostname }}"
+    - "{{ keepalived_vip }}"
+    - "%"
+
+- name: "4.5. Configurar RabbitMQ (Usuário OpenStack)"
+  rabbitmq_user:
+    user: openstack
+    password: "{{ rabbitmq_password }}"
+    vhost: /
+    configure_priv: .*
+    read_priv: .*
+    write_priv: .*
+    state: present
+
+- name: "4.6. TESTE: Validar se MariaDB está ouvindo no 0.0.0.0"
+  shell: "ss -tulpn | grep 3306"
+  register: mysql_port_check
+  changed_when: false
+
+- name: "Exibir Status da Porta MySQL"
+  debug:
+    msg: "{{ mysql_port_check.stdout }}"

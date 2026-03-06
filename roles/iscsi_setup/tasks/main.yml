@@ -1,0 +1,55 @@
+---
+- name: "4.1. Instalar pacotes iSCSI, Multipath e LVM"
+  apt:
+    name: [open-iscsi, multipath-tools, multipath-tools-boot, lvm2]
+    state: present
+
+- name: "4.2. Configurar Nome do Iniciador (IQN Dinâmico)"
+  template:
+    src: initiatorname.iscsi.j2
+    dest: /etc/iscsi/initiatorname.iscsi
+  notify: reiniciar_iscsi
+
+- name: "4.3. Aplicar Configuração Multipath (Otimizada Dell Equallogic)"
+  template:
+    src: multipath.conf.j2
+    dest: /etc/multipath.conf
+  notify: reiniciar_multipath
+
+- name: "4.4. Garantir que os serviços estão habilitados"
+  service:
+    name: "{{ item }}"
+    state: started
+    enabled: yes
+  loop: [iscsid, multipath-tools]
+
+- name: "4.5. Descobrir e Login no Storage"
+  shell: |
+    iscsiadm -m discovery -t sendtargets -p {{ storage_group_ip }}
+    iscsiadm -m node --login
+  register: iscsi_login
+  changed_when: "'successful' in iscsi_login.stdout"
+  failed_when: false
+
+- name: "4.6. Forçar Redetecção de Dispositivos e Multipath"
+  shell: |
+    iscsiadm -m session --rescan
+    multipath -v2
+    multipathd reconfigure
+  changed_when: true
+
+- name: "4.7. Criar Physical Volume (PV) no disco iSCSI"
+  lvg:
+    vg: cinder-volumes
+    pvs: /dev/sdb
+    state: present
+  when: inventory_hostname == cluster_leader
+
+- name: "4.8. Validar presença de dispositivos Multipath"
+  command: "multipath -ll"
+  register: multipath_status
+  changed_when: false
+
+- name: "Exibir Status Final do Storage"
+  debug:
+    msg: "{{ multipath_status.stdout_lines }}"

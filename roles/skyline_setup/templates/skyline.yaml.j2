@@ -1,0 +1,10 @@
+skyline:
+  listen_address: "127.0.0.1"
+  listen_port: 9999
+  keystone_url: "http://{{ keepalived_vip }}:5000/v3"
+  default_domain: "Default"
+  database_url: "postgresql://keystone:{{ keystone_admin_password }}@{{ keepalived_vip }}/keystone"
+  # String fixa para evitar erro de conversão de tipo no Jinja
+  secret_key: "INB_OPENSTACK_SECRET_KEY_2026"
+  log_level: "INFO"
+  log_file: "/var/log/skyline/skyline.log"

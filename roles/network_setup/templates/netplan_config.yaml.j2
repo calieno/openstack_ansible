@@ -1,0 +1,20 @@
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    {{ iface_10g_p1 }}:
+      mtu: 9000
+    {{ iface_10g_p2 }}:
+      mtu: 9000
+    iscsi01:
+      addresses: ["{{ host_ip_iscsi01 }}/24"]
+      mtu: 9000
+      critical: true
+    iscsi02:
+      addresses: ["{{ host_ip_iscsi02 }}/24"]
+      mtu: 9000
+      critical: true
+    vlan132:
+      addresses: ["{{ host_ip_cluster }}/24"]
+      mtu: 9000
+      critical: true

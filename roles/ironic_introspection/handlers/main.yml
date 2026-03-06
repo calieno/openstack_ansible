@@ -1,0 +1,13 @@
+---
+- name: reiniciar inspector
+  service:
+    name: ironic-inspector
+    state: restarted
+
+- name: reiniciar ironic
+  service:
+    name: "{{ item }}"
+    state: restarted
+  loop:
+    - ironic-api
+    - ironic-conductor

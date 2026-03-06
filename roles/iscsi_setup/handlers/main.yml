@@ -1,0 +1,10 @@
+---
+- name: reiniciar_iscsi
+  service:
+    name: iscsid
+    state: restarted
+
+- name: reiniciar_multipath
+  service:
+    name: multipath-tools
+    state: restarted

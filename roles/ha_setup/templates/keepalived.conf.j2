@@ -1,0 +1,66 @@
+global_defs {
+    router_id {{ inventory_hostname }}
+    enable_script_security
+    script_user root
+}
+
+# Script para checar se os serviços base estão vivos
+vrrp_script check_haproxy {
+    script "killall -0 haproxy"  # Haproxy é quem distribui a carga das APIs
+    interval 2
+    weight 2
+}
+
+# VIP de Gerência (Rede 10.25.41.0)
+vrrp_instance VI_MGMT {
+    state {{ 'MASTER' if inventory_hostname == cluster_leader else 'BACKUP' }}
+    interface {{ physical_iface_mgmt }}
+    virtual_router_id 70
+    priority {{ 150 if inventory_hostname == cluster_leader else 100 }}
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass {{ mysql_root_password | truncate(8, True, '') }}
+    }
+    virtual_ipaddress {
+        {{ keepalived_vip }}/25
+    }
+    track_script {
+        check_haproxy
+    }
+}
+
+# VIP de Cluster/API (VLAN 132)
+vrrp_instance VI_CLUS {
+    state {{ 'MASTER' if inventory_hostname == cluster_leader else 'BACKUP' }}
+    interface vlan132
+    virtual_router_id 132
+    priority {{ 150 if inventory_hostname == cluster_leader else 100 }}
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass {{ mysql_root_password | truncate(8, True, '') }}
+    }
+    virtual_ipaddress {
+        {{ keepalived_cluster_vip }}/24
+    }
+    track_script {
+        check_haproxy
+    }
+}
+
+# VIP de Dados/Storage (VLAN 130)
+vrrp_instance VI_DATA {
+    state {{ 'MASTER' if inventory_hostname == cluster_leader else 'BACKUP' }}
+    interface iscsi01
+    virtual_router_id 130
+    priority {{ 150 if inventory_hostname == cluster_leader else 100 }}
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass {{ mysql_root_password | truncate(8, True, '') }}
+    }
+    virtual_ipaddress {
+        {{ keepalived_data_vip }}/24
+    }
+}

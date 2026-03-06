@@ -1,0 +1,6 @@
+---
+- name: "Estágio 07: Glance (Serviço de Imagens via PostgreSQL)"
+  hosts: mab
+  become: yes
+  roles:
+    - glance_setup

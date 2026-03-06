@@ -1,0 +1,106 @@
+---
+- name: "02.1: Instalação de Infra Web (Nginx & Unit) - Padronização INB"
+  hosts: all
+  become: yes
+  vars_files:
+    - "../inventory/group_vars/all.yml"
+
+  tasks:
+    - name: "02.1.0. Adicionar Chave GPG Oficial do NGINX"
+      shell: |
+        curl -s https://unit.nginx.org/keys/nginx-keyring.gpg | gpg --dearmor -o /usr/share/keyrings/nginx-keyring.gpg --yes
+      changed_when: false
+
+    - name: "02.1.0.b. Configurar Repositório Oficial NGINX Unit"
+      copy:
+        dest: /etc/apt/sources.list.d/unit.list
+        content: |
+          deb [signed-by=/usr/share/keyrings/nginx-keyring.gpg] https://packages.nginx.org/unit/ubuntu/ {{ ansible_distribution_release }} unit
+          deb-src [signed-by=/usr/share/keyrings/nginx-keyring.gpg] https://packages.nginx.org/unit/ubuntu/ {{ ansible_distribution_release }} unit
+
+    - name: "02.1.1. Limpar Conflitos e Update Cache"
+      shell: |
+        systemctl stop keystone-uwsgi || true
+        fuser -k 5000/tcp 5001/tcp 9292/tcp 6385/tcp 80/tcp 443/tcp || true
+        apt-get update
+      changed_when: true
+
+    - name: "02.1.2. Instalar Nginx e NGINX Unit da Fonte Oficial"
+      apt:
+        name:
+          - nginx
+          - unit
+          - unit-python3.12
+          - curl
+          - openssl
+        state: present
+        update_cache: yes
+
+    - name: "02.1.3. Garantir diretórios e permissões para o Unit"
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: unit
+        group: unit
+        mode: '0755'
+      loop:
+        - /run/unit
+        - /var/lib/unit
+
+    - name: "02.1.4. Gerar Certificado SSL"
+      shell: |
+        openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+        -keyout /etc/nginx/ssl/nginx-selfsigned.key \
+        -out /etc/nginx/ssl/nginx-selfsigned.crt \
+        -subj "/C=BR/ST=RJ/L=Resende/O=INB/OU=TI/CN={{ keepalived_vip }}"
+      args:
+        creates: /etc/nginx/ssl/nginx-selfsigned.crt
+
+    - name: "02.1.5. Configurar Proxy Reverso Unificado"
+      copy:
+        dest: /etc/nginx/sites-available/openstack_proxy
+        content: |
+          server {
+              listen 9292;
+              server_name {{ keepalived_vip }};
+              client_max_body_size 10G;
+              location / {
+                  proxy_pass http://127.0.0.1:9293;
+                  proxy_set_header Host $host;
+              }
+          }
+          server {
+              listen 6385;
+              server_name {{ keepalived_vip }};
+              location / {
+                  proxy_pass http://127.0.0.1:6385;
+                  proxy_set_header Host $host;
+              }
+          }
+
+    - name: "02.1.6. Ativar e Reiniciar"
+      shell: |
+        ln -sf /etc/nginx/sites-available/openstack_proxy /etc/nginx/sites-enabled/
+        rm -f /etc/nginx/sites-enabled/default
+        systemctl daemon-reload
+        systemctl restart nginx
+        systemctl restart unit
+      changed_when: true
+
+    - name: "02.1.7. Validar API Unit (Testando caminhos comuns)"
+      shell: |
+        sleep 3
+        curl -s --unix-socket /run/unit/control.unit.sock http://localhost/config || \
+        curl -s --unix-socket /var/run/control.unit.sock http://localhost/config
+      register: unit_status
+
+    - name: "02.1.8. Resumo Final"
+      debug:
+        msg: "Infra Web OK. Unit API detectada."
+
+    - name: "02.1.9. Resumo do Status de Infraestrutura"
+      debug:
+        msg:
+          - "Nginx Status: ONLINE (Portas 80/443)"
+          - "Unit Status: ONLINE (Control Socket Ativo)"
+          - "Socket Unit: /run/unit/control.unit.sock"

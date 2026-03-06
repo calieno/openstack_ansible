@@ -1,0 +1,110 @@
+---
+- name: "1. Instalar Ironic Inspector"
+  apt:
+    name:
+      - ironic-inspector
+      - python3-ironic-inspector-client
+    state: present
+
+- name: "2. Criar Banco ironic_inspector"
+  become: yes
+  become_user: postgres
+  postgresql_db:
+    name: ironic_inspector
+    owner: ironic
+    state: present
+
+- name: "3. Aplicar Configuração do Inspector"
+  template:
+    src: ../../ironic_setup/templates/inspector.conf.j2
+    dest: /etc/ironic-inspector/inspector.conf
+    owner: ironic-inspector
+    group: ironic-inspector
+    mode: '0640'
+  notify: reiniciar inspector
+
+- name: "4. Sincronizar Banco"
+  shell: "ironic-inspector-dbsync --config-file /etc/ironic-inspector/inspector.conf upgrade"
+  become_user: ironic-inspector
+
+- name: "5. Baixar Imagens IPA (TinyIPA)"
+  get_url:
+    url: "{{ item.url }}"
+    dest: "/var/lib/ironic/images/{{ item.file }}"
+    mode: '0644'
+  loop:
+    - { url: 'https://tarballs.opendev.org/openstack/ironic-python-agent/tinyipa/files/tinyipa-master.vmlinuz', file: 'ipa.kernel' }
+    - { url: 'https://tarballs.opendev.org/openstack/ironic-python-agent/tinyipa/files/tinyipa-master.gz', file: 'ipa.initramfs' }
+  become: yes
+  run_once: true
+
+- name: "6. Registrar Imagens IPA no Glance"
+  shell: |
+    export OS_AUTH_URL=http://{{ keepalived_vip }}:5000/v3
+    export OS_IDENTITY_API_VERSION=3
+    export OS_USERNAME=admin
+    export OS_PASSWORD={{ keystone_admin_password }}
+    export OS_USER_DOMAIN_NAME=Default
+    export OS_PROJECT_NAME=Datacenter
+    export OS_PROJECT_DOMAIN_NAME=INB
+
+    openstack image show ipa-kernel || openstack image create --public --container-format aki --disk-format aki --file /var/lib/ironic/images/ipa.kernel ipa-kernel
+    openstack image show ipa-initramfs || openstack image create --public --container-format ari --disk-format ari --file /var/lib/ironic/images/ipa.initramfs ipa-initramfs
+  run_once: true
+
+- name: "7. Habilitar a interface Inspector no Ironic"
+  ini_file:
+    path: /etc/ironic/ironic.conf
+    section: DEFAULT
+    option: enabled_inspect_interfaces
+    value: "inspector,no-inspect,redfish"
+
+- name: "8. Configurar comunicação do Ironic com o Inspector"
+  ini_file:
+    path: /etc/ironic/ironic.conf
+    section: inspector
+    option: "{{ item.opt }}"
+    value: "{{ item.val }}"
+  loop:
+    - { opt: 'auth_type', val: 'password' }
+    - { opt: 'auth_url', val: 'http://{{ keepalived_vip }}:5000/v3' }
+    - { opt: 'project_name', val: 'service' }
+    - { opt: 'project_domain_name', val: 'Default' }
+    - { opt: 'user_domain_name', val: 'Default' }
+    - { opt: 'username', val: 'ironic' }
+    - { opt: 'password', val: '{{ keystone_admin_password }}' } 
+    - { opt: 'endpoint_override', val: 'http://{{ keepalived_vip }}:5050' }
+  notify: reiniciar ironic
+
+- name: "9. Forçar restart do Ironic para carregar módulo inspector"
+  service:
+    name: "{{ item }}"
+    state: restarted
+  loop:
+    - ironic-api
+    - ironic-conductor
+
+- name: "10. Iniciar Introspection nas Lâminas Dell"
+  shell: |
+    export OS_AUTH_URL=http://{{ keepalived_vip }}:5000/v3
+    export OS_IDENTITY_API_VERSION=3
+    export OS_USERNAME=admin
+    export OS_PASSWORD={{ keystone_admin_password }}
+    export OS_USER_DOMAIN_NAME=Default
+    export OS_PROJECT_NAME=Datacenter
+    export OS_PROJECT_DOMAIN_NAME=INB
+
+    KERNEL_ID=$(openstack image show ipa-kernel -c id -f value)
+    RAMDISK_ID=$(openstack image show ipa-initramfs -c id -f value)
+
+    # 1. Configura as imagens do IPA e ATIVA a interface do Inspector
+    openstack baremetal node set {{ item.name }} \
+      --driver-info deploy_kernel=$KERNEL_ID \
+      --driver-info deploy_ramdisk=$RAMDISK_ID \
+      --inspect-interface inspector
+
+    # 2. Move para manageable e dispara inspeção
+    openstack baremetal node manage {{ item.name }} || true
+    openstack baremetal node inspect {{ item.name }}
+  loop: "{{ baremetal_nodes }}"
+  when: item.name != 'lamina-14'

@@ -1,0 +1,33 @@
+---
+- name: "1.1. Atualizar cache e pacotes base"
+  apt:
+    update_cache: yes
+    upgrade: dist
+
+- name: "1.2. Instalar ferramentas essenciais"
+  apt:
+    name: [python3-openstackclient, software-properties-common, chrony, curl, vim, bridge-utils]
+    state: present
+
+- name: "1.3. Configurar Timezone"
+  timezone:
+    name: America/Sao_Paulo
+
+- name: "1.4. Configurar Repositório OpenStack"
+  shell: |
+    add-apt-repository -y cloud-archive:{{ os_codename }}
+    apt update
+  changed_when: false
+
+- name: "1.5. Aplicar Configuração Chrony (NTP INB)"
+  template:
+    src: chrony.conf.j2
+    dest: /etc/chrony/chrony.conf
+  notify: restart_chrony
+
+- name: "1.6. Ajustar /etc/hosts para resolução interna"
+  blockinfile:
+    path: /etc/hosts
+    block: |
+      {{ hostvars[inventory_hostname]['ansible_' + management_iface]['ipv4']['address'] }} {{ inventory_hostname }}
+      {{ keepalived_vip }} controller

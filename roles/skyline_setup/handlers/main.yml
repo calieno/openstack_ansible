@@ -1,0 +1,5 @@
+---
+- name: reiniciar skyline
+  systemd:
+    name: skyline
+    state: restarted

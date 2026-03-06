@@ -1,0 +1,6 @@
+---
+- name: "Estágio 02: Configuração de Rede (OVS/VLANs)"
+  hosts: all_control
+  become: yes
+  roles:
+    - network_setup

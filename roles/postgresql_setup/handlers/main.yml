@@ -1,0 +1,10 @@
+---
+- name: reiniciar postgres
+  service:
+    name: postgresql
+    state: restarted
+
+- name: reiniciar rabbitmq
+  service:
+    name: rabbitmq-server
+    state: restarted

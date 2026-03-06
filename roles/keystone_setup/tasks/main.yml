@@ -1,0 +1,300 @@
+---
+# 1. PREPARAÇÃO DO BANCO DE DADOS (POSTGRESQL)
+- name: "6.1. Criar usuário Keystone no Postgres"
+  become: yes
+  become_user: postgres
+  postgresql_user:
+    name: keystone
+    password: "{{ keystone_admin_password }}"
+    state: present
+
+- name: "6.2. Criar banco de dados do Keystone com Dono (Owner)"
+  become: yes
+  become_user: postgres
+  postgresql_db:
+    name: keystone
+    owner: keystone
+    state: present
+
+- name: "6.3. Garantir privilégios totais no schema public"
+  become: yes
+  become_user: postgres
+  postgresql_privs:
+    db: keystone
+    role: keystone
+    objs: ALL_IN_SCHEMA
+    privs: ALL
+    state: present
+
+# 2. INSTALAÇÃO E AMBIENTE
+- name: "6.4. Instalar Keystone, Dependências LDAP e Driver Postgres"
+  apt:
+    name: 
+      - keystone
+      - python3-psycopg2
+      - python3-ldappool
+      - python3-ldap
+      - python3-openstackclient
+      - apache2
+      - libapache2-mod-wsgi-py3
+      - acl
+    state: present
+    update_cache: yes
+
+- name: "6.5. Ajustar Memcached para ouvir na rede (necessário para tokens)"
+  lineinfile:
+    path: /etc/memcached.conf
+    regexp: '^-l 127.0.0.1'
+    line: '-l 0.0.0.0'
+  notify: reiniciar memcached
+
+- name: "6.6. Forçar UTF-8 no ambiente do Apache (Evita UnicodeDecodeError)"
+  lineinfile:
+    path: /etc/apache2/envvars
+    line: "{{ item }}"
+  loop:
+    - "export LANG=C.UTF-8"
+    - "export LC_ALL=C.UTF-8"
+
+- name: "6.7. Criar diretório de domínios"
+  file:
+    path: /etc/keystone/domains
+    state: directory
+    owner: keystone
+    group: keystone
+    mode: '0750'
+
+# 3. CONFIGURAÇÃO E BOOTSTRAP
+- name: "6.8. Aplicar Configurações (Templates)"
+  template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: keystone
+    group: keystone
+    mode: '0640'
+  loop:
+    - { src: 'keystone.conf.j2', dest: '/etc/keystone/keystone.conf' }
+    - { src: 'keystone.INB.conf.j2', dest: '/etc/keystone/domains/keystone.INB.conf' }
+
+- name: "6.9. Sincronizar Banco e Bootstrap (Sintaxe Limpa)"
+  shell: |
+    keystone-manage db_sync
+    keystone-manage fernet_setup --keystone-user keystone --keystone-group keystone
+    keystone-manage credential_setup --keystone-user keystone --keystone-group keystone
+    keystone-manage bootstrap --bootstrap-password {{ keystone_admin_password }} \
+      --bootstrap-admin-url http://{{ keepalived_vip }}:5000/v3/ \
+      --bootstrap-internal-url http://{{ keepalived_cluster_vip }}:5000/v3/ \
+      --bootstrap-public-url http://{{ keepalived_vip }}:5000/v3/ \
+      --bootstrap-region-id RegionOne
+  environment:
+    PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  run_once: true
+
+# 4. CONFIGURAÇÃO DO SERVIDOR DE APLICAÇÃO (uWSGI via Systemd)
+- name: "6.10. Configurar Serviço Keystone uWSGI"
+  block:
+    - name: "Garantir que as chaves Fernet tenham permissão correta"
+      file:
+        path: /etc/keystone/fernet-keys
+        state: directory
+        owner: keystone
+        group: keystone
+        mode: '0700'
+        recurse: yes
+
+    - name: "Criar Unidade Systemd dedicada para o Keystone"
+      copy:
+        dest: /etc/systemd/system/keystone-uwsgi.service
+        content: |
+          [Unit]
+          Description=uWSGI Keystone Service
+          After=network.target
+
+          [Service]
+          User=keystone
+          Group=keystone
+          # Este é exatamente o comando que funcionou no seu teste manual
+          ExecStart=/usr/bin/uwsgi --plugin python3 --http-socket 127.0.0.1:5001 --wsgi-file /usr/bin/keystone-wsgi-public --master --processes 5 --die-on-term
+          Restart=always
+          StandardOutput=append:/var/log/keystone/keystone-uwsgi.log
+          StandardError=append:/var/log/keystone/keystone-uwsgi.log
+
+          [Install]
+          WantedBy=multi-user.target
+
+# 5. CONFIGURAÇÃO NGINX (PROXY REVERSO)
+- name: "6.11. Configurar Nginx para apontar para o uWSGI"
+  block:
+    - copy:
+        dest: /etc/nginx/sites-available/keystone
+        content: |
+          server {
+              listen 5000;
+              server_name {{ keepalived_vip }};
+
+              location / {
+                  proxy_pass http://127.0.0.1:5001;
+                  proxy_set_header Host $host;
+                  proxy_set_header X-Real-IP $remote_addr;
+              }
+          }
+
+    - shell: |
+        ln -sf /etc/nginx/sites-available/keystone /etc/nginx/sites-enabled/keystone
+        rm -f /etc/nginx/sites-enabled/default
+        systemctl daemon-reload
+        systemctl enable keystone-uwsgi
+        systemctl restart keystone-uwsgi nginx
+      changed_when: true
+
+# 6. VALIDAÇÃO (SEU BLOCO ORIGINAL)
+- name: "6.12. VALIDAR BOOTSTRAP: Verificar autenticação admin"
+  shell: |
+    openstack --os-auth-url http://localhost:5000/v3 \
+    --os-project-name admin --os-username admin --os-password {{ keystone_admin_password }} \
+    --os-user-domain-name Default --os-project-domain-name Default \
+    --os-identity-api-version 3 \
+    token issue
+  register: bootstrap_verify
+  until: bootstrap_verify.rc == 0
+  retries: 5
+  delay: 10
+
+- name: "6.13. Criar o domínio INB no Keystone"
+  shell: |
+    export OS_USERNAME=admin
+    export OS_PASSWORD={{ keystone_admin_password }}
+    export OS_PROJECT_NAME=admin
+    export OS_USER_DOMAIN_NAME=Default
+    export OS_PROJECT_DOMAIN_NAME=Default
+    export OS_AUTH_URL=http://{{ keepalived_vip }}:5000/v3
+    export OS_IDENTITY_API_VERSION=3
+    openstack domain create --description "Dominio Corporativo INB (LDAP)" INB
+  register: domain_create
+  failed_when:
+    - domain_create.rc != 0
+    - "'Conflict' not in domain_create.stderr"
+    - "'AlreadyExists' not in domain_create.stderr"
+  changed_when: "'Conflict' not in domain_create.stderr"
+  run_once: true
+
+
+- name: "6.14. Criar o projeto Datacenter dentro do domínio INB"
+  shell: |
+    export OS_USERNAME=admin
+    export OS_PASSWORD={{ keystone_admin_password }}
+    export OS_PROJECT_NAME=admin
+    export OS_USER_DOMAIN_NAME=Default
+    export OS_PROJECT_DOMAIN_NAME=Default
+    export OS_AUTH_URL=http://{{ keepalived_vip }}:5000/v3
+    export OS_IDENTITY_API_VERSION=3
+    openstack project show Datacenter --domain INB || \
+    openstack project create --domain INB --description "Nucleo de Bare Metal" Datacenter
+  run_once: true
+
+- name: "6.15. Vincular o grupo LDAP à Role de admin no Domínio e Projeto"
+  shell: |
+    export OS_USERNAME=admin
+    export OS_PASSWORD={{ keystone_admin_password }}
+    export OS_PROJECT_NAME=admin
+    export OS_USER_DOMAIN_NAME=Default
+    export OS_PROJECT_DOMAIN_NAME=Default
+    export OS_AUTH_URL=http://{{ keepalived_vip }}:5000/v3
+    export OS_IDENTITY_API_VERSION=3
+    
+    # Vincula o grupo do AD definido no all.yml como admin do domínio INB
+    openstack role add --domain INB --group "{{ ldap_admin_group }}" --group-domain INB admin
+    
+    # Vincula o grupo do AD como admin do projeto Datacenter
+    openstack role add --project Datacenter --project-domain INB --group "{{ ldap_admin_group }}" --group-domain INB admin
+  run_once: true
+  register: ldap_binding
+  failed_when: 
+    - ldap_binding.rc != 0 
+    - "'Conflict' not in ldap_binding.stderr"
+
+# 6. VALIDAÇÃO FINAL E TESTE LDAP
+- name: "6.16. TESTE DE CONECTIVIDADE LDAP: Listar usuários do domínio INB"
+  shell: |
+    export OS_AUTH_URL=http://{{ keepalived_vip }}:5000/v3
+    export OS_IDENTITY_API_VERSION=3
+    export OS_USERNAME=admin
+    export OS_PASSWORD={{ keystone_admin_password }}
+    export OS_USER_DOMAIN_NAME=Default
+    export OS_PROJECT_NAME=admin
+    export OS_PROJECT_DOMAIN_NAME=Default
+
+    echo "--- LISTA DE USUÁRIOS DETECTADOS NO AD (DOMÍNIO INB) ---"
+    openstack user list --domain INB
+    
+    echo "--- LISTA DE GRUPOS DETECTADOS NO AD (DOMÍNIO INB) ---"
+    openstack group list --domain INB
+  register: ldap_test
+  changed_when: false
+  run_once: true
+
+- name: "6.17. Exibir resultado do teste LDAP no console"
+  debug:
+    msg: "{{ ldap_test.stdout_lines }}"
+
+
+- name: "Keystone: Criar Usuário de Serviço para o Inspector"
+  shell: |
+    export OS_AUTH_URL=http://{{ keepalived_vip }}:5000/v3
+    export OS_IDENTITY_API_VERSION=3
+    export OS_USERNAME=admin
+    export OS_PASSWORD={{ keystone_admin_password }}
+    export OS_USER_DOMAIN_NAME=Default
+    export OS_PROJECT_NAME=admin
+    export OS_PROJECT_DOMAIN_NAME=Default
+
+    # 1. Cria o usuário se não existir
+    openstack user show ironic-inspector --domain Default > /dev/null 2>&1 || \
+    openstack user create --domain Default --password {{ keystone_admin_password }} ironic-inspector
+
+    # 2. Garante que o projeto 'service' existe no domínio Default
+    openstack project show service --domain Default > /dev/null 2>&1 || \
+    openstack project create --domain Default service
+
+    # 3. Atribui a role admin ao usuário no projeto service (Ambos no domínio Default)
+    openstack role add --project service --project-domain Default --user ironic-inspector --user-domain Default admin
+  register: inspector_setup
+  changed_when: false
+
+- name: "Keystone: Registrar Serviço e Endpoints do Inspector (Porta 5050)"
+  shell: |
+    export OS_AUTH_URL=http://{{ keepalived_vip }}:5000/v3
+    export OS_IDENTITY_API_VERSION=3
+    export OS_USERNAME=admin
+    export OS_PASSWORD={{ keystone_admin_password }}
+    export OS_USER_DOMAIN_NAME=Default
+    export OS_PROJECT_NAME=Datacenter
+    export OS_PROJECT_DOMAIN_NAME=INB
+
+    openstack service show ironic-inspector > /dev/null 2>&1 || \
+    openstack service create --name ironic-inspector --description "Ironic Inspector" baremetal-introspection
+
+    # Public, Internal e Admin endpoints
+    for type in public internal admin; do
+      openstack endpoint show baremetal-introspection -f value -c interface | grep -q $type || \
+      openstack endpoint create --region RegionOne baremetal-introspection $type http://{{ keepalived_vip }}:5050/v1
+    done
+  changed_when: false
+
+- name: "Keystone: Vincular Administradores do Domínio INB (LDAP) ao Projeto Datacenter"
+  shell: |
+    export OS_AUTH_URL=http://{{ keepalived_vip }}:5000/v3
+    export OS_IDENTITY_API_VERSION=3
+    export OS_USERNAME=admin
+    export OS_PASSWORD={{ keystone_admin_password }}
+    export OS_USER_DOMAIN_NAME=Default
+    export OS_PROJECT_NAME=Datacenter
+    export OS_PROJECT_DOMAIN_NAME=INB
+
+    # Exemplo: Dando permissão admin para um usuário específico vindo do LDAP/AD
+    # Você pode repetir isso para grupos se o seu backend LDAP suportar mapping de grupos
+    openstack role add --project Datacenter --project-domain INB --user-domain INB --user {{ item }} admin
+  loop:
+    - adm1974  # Seu usuário LDAP
+    #-  outro usuário
+  changed_when: false

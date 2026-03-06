@@ -1,0 +1,18 @@
+[database]
+# Mudança de mysql+pymysql para postgresql+psycopg2
+connection = postgresql+psycopg2://keystone:{{ keystone_admin_password }}@{{ keepalived_cluster_vip }}/keystone
+
+[identity]
+driver = sql
+domain_specific_drivers_enabled = True
+domain_config_dir = /etc/keystone/domains
+
+[assignment]
+driver = sql
+
+[resource]
+driver = sql
+
+[token]
+provider = fernet
+expiration = 3600

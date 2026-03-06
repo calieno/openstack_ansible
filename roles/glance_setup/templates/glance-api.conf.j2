@@ -1,0 +1,26 @@
+[database]
+# Conexão PostgreSQL via Psycopg2
+connection = postgresql+psycopg2://glance:{{ glance_db_password }}@{{ keepalived_cluster_vip }}/glance
+
+[keystone_authtoken]
+www_authenticate_uri = http://{{ keepalived_vip }}:5000/v3
+auth_url = http://{{ keepalived_cluster_vip }}:5000/v3
+memcached_servers = {{ keepalived_cluster_vip }}:11211
+auth_type = password
+project_domain_name = Default
+user_domain_name = Default
+project_name = service
+username = glance
+password = {{ glance_keystone_password }}
+
+[paste_deploy]
+flavor = keystone
+
+[glance_store]
+stores = file,http
+default_store = file
+filesystem_store_datadir = /var/lib/glance/images/
+
+[oslo_policy]
+enforce_scope = False
+enforce_new_defaults = False

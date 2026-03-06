@@ -1,0 +1,6 @@
+---
+- name: "Estágio 01: Bootstrap e Common"
+  hosts: all_control
+  become: yes
+  roles:
+    - common

@@ -1,0 +1,10 @@
+# Configuração NTP INB Standard
+confdir /etc/chrony/conf.d
+{% for server in dns_servers %}
+server {{ server }} iburst maxpoll 10
+{% endfor %}
+authselectmode ignore
+driftfile /var/lib/chrony/chrony.drift
+logdir /var/log/chrony
+makestep 1.0 3
+rtcsync

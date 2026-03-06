@@ -1,0 +1,31 @@
+[identity]
+driver = ldap
+
+[ldap]
+url = {{ ldap_url }}
+user = {{ ldap_user_dn }}
+password = {{ ldap_password }}
+suffix = {{ ldap_suffix }}
+query_scope = sub
+
+# Configurações específicas para Active Directory
+user_tree_dn = {{ ldap_user_tree_dn }}
+user_objectclass = person
+user_id_attribute = sAMAccountName
+user_name_attribute = sAMAccountName
+user_mail_attribute = mail
+user_enabled_attribute = userAccountControl
+user_enabled_mask = 2
+user_enabled_default = 512
+user_attribute_ignore = password,tenant_id,tenants
+user_filter = {{ ldap_user_filter }}
+
+group_tree_dn = {{ ldap_group_tree_dn }}
+group_objectclass = group
+group_id_attribute = cn
+group_name_attribute = cn
+group_member_attribute = member
+group_desc_attribute = description
+
+[resource]
+driver = sql

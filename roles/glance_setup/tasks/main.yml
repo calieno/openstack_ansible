@@ -1,0 +1,126 @@
+---
+# 1. PREPARAÇÃO DO BANCO DE DADOS (POSTGRESQL)
+- name: "7.1. Garantir usuário e banco Glance no Postgres"
+  become: yes
+  become_user: postgres
+  block:
+    - name: "Garantir usuário glance no Postgres"
+      postgresql_user:
+        name: glance
+        password: "{{ glance_db_password }}"
+        state: present
+
+    - name: "Garantir banco glance com owner correto"
+      postgresql_db:
+        name: glance
+        owner: glance
+        state: present
+
+    - name: "Garantir privilégios no schema public"
+      postgresql_privs:
+        db: glance
+        role: glance
+        objs: ALL_IN_SCHEMA
+        privs: ALL
+        state: present
+
+# 2. INSTALAÇÃO E AMBIENTE
+- name: "7.2. Instalar Glance e Driver Postgres"
+  apt:
+    name:
+      - glance
+      - python3-psycopg2
+    state: present
+    update_cache: yes
+
+# 3. CONFIGURAÇÃO DO SERVIÇO (GLANCE-API)
+- name: "7.3. Aplicar Configuração do Glance-API"
+  template:
+    src: glance-api.conf.j2
+    dest: /etc/glance/glance-api.conf
+    owner: glance
+    group: glance
+    mode: '0640'
+  notify: reiniciar glance
+
+- name: "7.4. Ajustar Porta para 9293 (Coexistência Nginx)"
+  ini_file:
+    path: /etc/glance/glance-api.conf
+    section: DEFAULT
+    option: "{{ item.option }}"
+    value: "{{ item.value }}"
+  loop:
+    - { option: 'bind_host', value: '127.0.0.1' }
+    - { option: 'bind_port', value: '9293' }
+  notify: reiniciar glance
+
+- name: "7.5. Sincronizar Banco de Imagens"
+  shell: "glance-manage db_sync"
+  become: yes
+  become_user: glance
+  run_once: true
+
+# 4. CONFIGURAÇÃO FRONT-END (NGINX)
+- name: "7.6. Forçar liberação da porta 9292 (Matar resquícios)"
+  shell: "fuser -k 9292/tcp || true"
+  changed_when: false
+
+- name: "7.7. Configurar Nginx como Front-end para Glance"
+  copy:
+    dest: /etc/nginx/sites-available/glance
+    content: |
+      server {
+          listen 9292;
+          server_name {{ keepalived_vip }};
+
+          # Aumentar timeout e tamanho de corpo para upload de imagens ISO/QCOW2
+          client_max_body_size 10G;
+          proxy_read_timeout 900;
+
+          location / {
+              proxy_pass http://127.0.0.1:9293;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+          }
+      }  # <-- O erro era a falta desta chave ou da anterior
+
+- name: "7.8. Ativar Site e Garantir Nginx"
+  shell: |
+    ln -sf /etc/nginx/sites-available/glance /etc/nginx/sites-enabled/glance
+    rm -f /etc/nginx/sites-enabled/default
+    nginx -t && systemctl restart nginx
+  changed_when: true
+
+
+# 5. REGISTRO NO KEYSTONE (CLI)
+- name: "7.9. Registrar Glance no Keystone (CLI)"
+  shell: |
+    export OS_USERNAME=admin
+    export OS_PASSWORD={{ keystone_admin_password }}
+    export OS_AUTH_URL=http://{{ keepalived_vip }}:5000/v3
+    export OS_PROJECT_NAME=admin
+    export OS_USER_DOMAIN_NAME=Default
+    export OS_PROJECT_DOMAIN_NAME=Default
+    export OS_IDENTITY_API_VERSION=3
+
+    # Criar usuário e permissões
+    openstack user show glance || openstack user create --domain Default --password {{ glance_keystone_password }} glance
+    openstack role add --project service --user glance admin
+
+    # Criar serviço
+    openstack service show image || openstack service create --name glance --description "OpenStack Image" image
+
+    # Criar endpoints
+    openstack endpoint show image || openstack endpoint create --region RegionOne image public http://{{ keepalived_vip }}:9292
+    openstack endpoint show image || openstack endpoint create --region RegionOne image internal http://{{ keepalived_cluster_vip }}:9292
+    openstack endpoint show image || openstack endpoint create --region RegionOne image admin http://{{ keepalived_cluster_vip }}:9292
+  run_once: true
+  changed_when: false
+
+- name: "7.10. Garantir Glance-API Habilitado"
+  service:
+    name: glance-api
+    state: started
+    enabled: yes

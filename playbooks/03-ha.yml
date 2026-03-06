@@ -1,0 +1,6 @@
+---
+- name: "Estágio 03: Alta Disponibilidade (Keepalived)"
+  hosts: all_control
+  become: yes
+  roles:
+    - ha_setup

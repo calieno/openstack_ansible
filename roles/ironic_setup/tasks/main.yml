@@ -1,0 +1,290 @@
+---
+- name: "8.0. Garantir compatibilidade SSL com iDRAC legada"
+  replace:
+    path: /etc/ssl/openssl.cnf
+    regexp: 'CipherString = DEFAULT@SECLEVEL=\d'
+    replace: 'CipherString = DEFAULT@SECLEVEL=0'
+  notify: reiniciar ironic
+
+- name: "8.1. Criar banco e usuário Ironic no Postgres"
+  become: yes
+  become_user: postgres
+  block:
+    - postgresql_user:
+        name: ironic
+        password: "{{ ironic_db_password }}"
+        state: present
+    - postgresql_db:
+        name: ironic
+        owner: ironic
+        state: present
+
+- name: "8.2. Instalar Ironic e Ferramentas IPMI"
+  apt:
+    name:
+      - ironic-api
+      - ironic-conductor
+      - python3-ironicclient
+      - python3-dracclient        # Dell
+      - python3-proliantutils     # HP iLO
+      - python3-sushy             # Redfish
+      - ipmitool                  # IPMI
+      - tftpd-hpa
+      - nginx
+      - python3-psycopg2
+    state: present
+
+- name: "8.3. Configurar diretórios de Boot e Permissões"
+  file:
+    path: "{{ item }}"
+    state: directory
+    owner: ironic
+    group: ironic
+    mode: '0755'
+  loop:
+    - /var/lib/ironic/tftpboot
+    - /var/lib/ironic/httpboot
+
+- name: "8.4. Aplicar ironic.conf"
+  template:
+    src: ironic.conf.j2
+    dest: /etc/ironic/ironic.conf
+    owner: ironic
+    group: ironic
+    mode: '0640'
+  notify: reiniciar ironic
+
+- name: "8.4.5. Ajustar Ironic API para ouvir na Porta Interna 6386"
+  ini_file:
+    path: /etc/ironic/ironic.conf
+    section: api
+    option: "{{ item.opt }}"
+    value: "{{ item.val }}"
+  loop:
+    - { opt: 'host_ip', val: '127.0.0.1' }
+    - { opt: 'port', val: '6386' }
+  notify: reiniciar ironic
+
+- name: "8.5. Sincronizar Banco Ironic"
+  become: yes
+  become_user: ironic
+  shell: "ironic-dbsync --config-file /etc/ironic/ironic.conf upgrade"
+  run_once: true
+
+- name: "8.6. Configurar Nginx para Ironic (Proxy Reverso 6385 -> 6386)"
+  copy:
+    dest: /etc/nginx/sites-available/ironic
+    content: |
+      server {
+          listen 6385;
+          server_name {{ keepalived_vip }};
+
+          location / {
+              proxy_pass http://127.0.0.1:6386;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+          }
+      }
+
+- name: "8.7. Garantir Configuração do Keystone no Unit"
+  shell: |
+    # 1. O "Pulo do Gato": Criar um link com a extensão .py para o Unit aceitar o import
+    ln -sf /usr/bin/keystone-wsgi-public /usr/bin/keystone_public.py
+
+    # 2. Limpeza e reinicialização do daemon
+    pkill -9 unitd || true
+    rm -f /run/unit/control.unit.sock
+    mkdir -p /run/unit && chown unit:unit /run/unit
+    /usr/sbin/unitd --control unix:/run/unit/control.unit.sock --pid /run/unit/unit.pid
+    sleep 2
+
+    # 3. Injeta a configuração usando o nosso novo módulo "keystone_public"
+    curl -s -X PUT \
+      --unix-socket /run/unit/control.unit.sock \
+      -d '{
+        "listeners": { "*:5001": { "pass": "applications/keystone" } },
+        "applications": {
+          "keystone": {
+            "type": "python 3.12",
+            "path": "/usr/bin",
+            "module": "keystone_public",
+            "user": "keystone",
+            "group": "keystone"
+          }
+        }
+      }' \
+      http://localhost/config
+  run_once: true
+  register: unit_cfg
+  failed_when: "'success' not in unit_cfg.stdout"
+
+- name: "8.7.5. Ativar Proxy do Ironic no Nginx"
+  shell: |
+    # Garante que o link simbólico existe e remove o default
+    ln -sf /etc/nginx/sites-available/ironic /etc/nginx/sites-enabled/ironic
+    rm -f /etc/nginx/sites-enabled/default
+
+    # Valida e reinicia apenas se a config estiver OK
+    nginx -t && systemctl restart nginx
+
+    # Garante que o serviço do Ironic API está de pé na porta 6385 interna
+    systemctl restart ironic-api ironic-conductor tftpd-hpa
+    sleep 5
+  changed_when: true
+
+- name: "8.7.8. Restaurar Acesso ao Keystone via Nginx (Porta 5000)"
+  copy:
+    dest: /etc/nginx/sites-available/keystone
+    content: |
+      server {
+          listen 5000;
+          server_name {{ keepalived_vip }};
+
+          location / {
+              proxy_pass http://127.0.0.1:5001;
+              proxy_set_header Host $host;
+              proxy_set_header X-Real-IP $remote_addr;
+              proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+              proxy_set_header X-Forwarded-Proto $scheme;
+          }
+      }
+
+- name: "8.7.9. Corrigir Rota do Proxy e Ativar Ironic"
+  shell: |
+    # 1. Corrige o arquivo openstack_proxy antigo para apontar para a 6386 interna!
+    if [ -f /etc/nginx/sites-available/openstack_proxy ]; then
+        sed -i 's/127.0.0.1:6385/127.0.0.1:6386/g' /etc/nginx/sites-available/openstack_proxy
+    fi
+
+    # 2. Mantém a limpeza dos links
+    rm -f /etc/nginx/sites-enabled/ironic /etc/nginx/sites-enabled/glance /etc/nginx/sites-enabled/default
+    ln -sf /etc/nginx/sites-available/keystone /etc/nginx/sites-enabled/keystone
+
+    # 3. Mata processos teimosos
+    systemctl stop ironic-api || true
+    fuser -k 6385/tcp || true
+    fuser -k 6386/tcp || true
+
+    # 4. Sobe o Nginx e Ironic
+    nginx -t && systemctl restart nginx
+    systemctl restart ironic-api ironic-conductor
+
+    # 5. Validação com margem de segurança
+    for i in {1..20}; do
+        if ss -tln | grep -q 127.0.0.1:6386; then
+            echo "Ironic API is UP on 6386"
+            exit 0
+        fi
+        sleep 2
+    done
+    exit 1
+  changed_when: true
+
+# 4. REGISTRO NO KEYSTONE (Com validação de endpoint)
+- name: "8.8. Registrar Ironic no Keystone (CLI)"
+  shell: |
+    export OS_USERNAME=admin
+    export OS_PASSWORD={{ keystone_admin_password }}
+    export OS_AUTH_URL=http://{{ keepalived_vip }}:5000/v3
+    export OS_PROJECT_NAME=admin
+    export OS_USER_DOMAIN_NAME=Default
+    export OS_PROJECT_DOMAIN_NAME=Default
+    export OS_IDENTITY_API_VERSION=3
+
+    # Tenta um comando simples para ver se o Keystone acordou
+    openstack token issue || (sleep 5 && openstack token issue)
+
+    openstack user show ironic || openstack user create --domain Default --password {{ ironic_keystone_password }} ironic
+    openstack role add --project service --user ironic admin
+    openstack service show baremetal || openstack service create --name ironic --description "Ironic baremetal" baremetal
+
+    for id in $(openstack endpoint list --service baremetal -c ID -f value); do openstack endpoint delete $id; done
+    openstack endpoint create --region RegionOne baremetal public http://{{ keepalived_vip }}:6385
+    openstack endpoint create --region RegionOne baremetal internal http://{{ keepalived_cluster_vip }}:6385
+    openstack endpoint create --region RegionOne baremetal admin http://{{ keepalived_cluster_vip }}:6385
+  run_once: true
+
+# 5. CADASTRO DE NODES (FIX SINTAXE)
+- name: "8.9. Cadastrar Nodes no Ironic"
+  shell: |
+    export OS_AUTH_URL=http://{{ keepalived_vip }}:5000/v3
+    export OS_IDENTITY_API_VERSION=3
+    export OS_USERNAME=admin
+    export OS_PASSWORD={{ keystone_admin_password }}
+    export OS_USER_DOMAIN_NAME=Default
+    export OS_PROJECT_NAME=Datacenter
+    export OS_PROJECT_DOMAIN_NAME=INB
+
+    if ! openstack baremetal node show {{ item.name }} > /dev/null 2>&1; then
+      {% if item.driver == 'idrac' %}
+      openstack baremetal node create --driver idrac --name {{ item.name }} \
+        --driver-info drac_address={{ item.address }} \
+        --driver-info drac_username={{ item.user }} \
+        --driver-info drac_password={{ item.pass }} \
+        --deploy-interface direct
+      {% elif item.driver == 'ilo' %}
+      openstack baremetal node create --driver ilo --name {{ item.name }} \
+        --driver-info ilo_address={{ item.address }} \
+        --driver-info ilo_username={{ item.user }} \
+        --driver-info ilo_password={{ item.pass }} \
+        --deploy-interface direct
+      {% else %}
+      openstack baremetal node create --driver manual-management --name {{ item.name }} \
+        --management-interface fake --power-interface fake --deploy-interface direct
+      {% endif %}
+    fi
+  loop: "{{ baremetal_nodes }}"
+
+#- name: "8.10. Cadastrar Portas (MACs)"
+#  shell: |
+#    export OS_AUTH_URL=http://{{ keepalived_vip }}:5000/v3
+#    export OS_IDENTITY_API_VERSION=3
+#    export OS_USERNAME=admin
+#    export OS_PASSWORD={{ keystone_admin_password }}
+#    export OS_USER_DOMAIN_NAME=Default
+#    export OS_PROJECT_NAME=Datacenter
+#    export OS_PROJECT_DOMAIN_NAME=INB
+
+    # Busca o UUID real do node pelo nome
+#    NODE_UUID=$(openstack baremetal node show {{ item.name }} -f value -c uuid)
+
+#    {% for mac in item.macs %}
+#    openstack baremetal port show {{ mac }} > /dev/null 2>&1 || \
+#    openstack baremetal port create --node "$NODE_UUID" {{ mac }}
+#    {% endfor %}
+#  loop: "{{ baremetal_nodes }}"
+
+
+- name: "8.10. Cadastrar Portas (MACs) e Validar"
+  shell: |
+    export OS_AUTH_URL=http://{{ keepalived_vip }}:5000/v3
+    export OS_IDENTITY_API_VERSION=3
+    export OS_USERNAME=admin
+    export OS_PASSWORD={{ keystone_admin_password }}
+    export OS_USER_DOMAIN_NAME=Default
+    export OS_PROJECT_NAME=Datacenter
+    export OS_PROJECT_DOMAIN_NAME=INB
+
+    NODE_UUID=$(openstack baremetal node show {{ item.name }} -f value -c uuid)
+
+    {% for mac in item.macs %}
+    # Verifica se o MAC já existe (ignora case)
+    if ! openstack baremetal port list -c Address -f value | grep -qi "{{ mac }}"; then
+        openstack baremetal port create --node "$NODE_UUID" {{ mac }}
+    fi
+    {% endfor %}
+
+    # Validação Final
+    {% for mac in item.macs %}
+    if ! openstack baremetal port list -c Address -f value | grep -qi "{{ mac }}"; then
+        echo "ERRO: A porta MAC {{ mac }} não foi encontrada após a criação!"
+        exit 1
+    fi
+    {% endfor %}
+
+    echo "SUCESSO: Todas as portas MAC validadas para o node {{ item.name }}."
+  loop: "{{ baremetal_nodes }}"
+  register: port_creation_status
+  changed_when: false # Como já sabemos que existe, podemos tratar como 'ok'

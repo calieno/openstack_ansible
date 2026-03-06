@@ -1,0 +1,71 @@
+---
+- name: "2.1. Instalar Open vSwitch"
+  apt:
+    name: openvswitch-switch
+    state: present
+
+- name: "2.2. Configurar Bond 20G (Balance-SLB para Switches Independentes)"
+  shell: |
+    ovs-vsctl --if-exists del-port ovs-lan10g bond0
+    ovs-vsctl --may-exist add-br ovs-lan10g
+
+    # balance-slb: Funciona com switches C1 e C2 separados
+    ovs-vsctl add-bond ovs-lan10g bond0 {{ iface_10g_p1 }} {{ iface_10g_p2 }} \
+    bond_mode=balance-slb \
+    other_config:bond-detect-mode=miimon \
+    other_config:bond-miimon-interval=100
+  changed_when: true
+
+- name: "2.3. Criar portas internas OVS com limpeza prévia"
+  shell: |
+    # Remove do OVS e do Kernel para garantir estado zero
+    ovs-vsctl --if-exists del-port {{ item.name }}
+    ip link delete {{ item.name }} || true
+
+    # Adiciona a porta garantindo o tipo internal
+    ovs-vsctl add-port ovs-lan10g {{ item.name }} tag={{ item.vlan }} \
+    -- set interface {{ item.name }} type=internal
+
+    # Levanta a interface no Kernel imediatamente
+    ip link set {{ item.name }} up
+  loop:
+    - { name: 'iscsi01', vlan: 130 }
+    - { name: 'iscsi02', vlan: 130 }
+    - { name: 'vlan132', vlan: 132 }
+  changed_when: true
+
+- name: "2.4. Aplicar Netplan para persistência de IPs"
+  template:
+    src: netplan_config.yaml.j2
+    dest: /etc/netplan/20-lan10g.yaml
+  register: netplan_apply
+
+- name: "2.5. Aplicar Netplan"
+  command: netplan apply
+  when: netplan_apply.changed
+
+- name: "2.5. Validar e Aplicar Netplan"
+  command: netplan apply
+  when: netplan_apply.changed
+
+- name: "2.8. TESTE: Validar interfaces e IPs"
+  shell: "ip -br addr show {{ item }}"
+  loop: [iscsi01, iscsi02, vlan132]
+  register: iface_test
+
+- name: "2.6. STATUS FINAL: Bond e Interfaces"
+  shell: ovs-appctl bond/show bond0
+  register: bond_status
+
+- name: "2.7. Forçar estado UP nas interfaces internas OVS"
+  shell: "ip link set {{ item }} up"
+  loop: [iscsi01, iscsi02, vlan132]
+  changed_when: false
+
+- name: "Exibir Status do LACP"
+  debug:
+    var: bond_status.stdout_lines
+
+- name: "Exibir Topologia OVS"
+  debug:
+    var: ovs_status.stdout_lines

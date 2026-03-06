@@ -1,0 +1,6 @@
+---
+- name: "Estágio 05: PostgreSQL e Mensageria (RabbitMQ)"
+  hosts: all_control
+  become: yes
+  roles:
+    - postgresql_setup

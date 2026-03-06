@@ -1,0 +1,6 @@
+---
+- name: "Estágio 06: Keystone (Identidade e Integração AD INB via PostgreSQL)"
+  hosts: mab
+  become: yes
+  roles:
+    - keystone_setup

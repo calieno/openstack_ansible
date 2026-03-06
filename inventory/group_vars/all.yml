@@ -1,0 +1,120 @@
+---
+###############################################################################
+# 01. INFRAESTRUTURA DE REDE E ALTA DISPONIBILIDADE (HA)
+###############################################################################
+cluster_name: "inb_openstack_cluster"
+
+os_distro: "ubuntu"
+os_version: "24.04"
+os_codename: "noble"
+
+# VIP de Gerência (VLAN 70 - Acesso Externo/Dashboard)
+keepalived_vip: "10.25.41.85"
+
+# VIP de Dados/iSCSI (VLAN 130 - Tráfego de Storage)
+keepalived_data_vip: "192.168.130.85"
+
+# VIP de Cluster (VLAN 132 - Tráfego Interno OpenStack/API)
+keepalived_cluster_vip: "192.168.132.85"
+
+# Interface de Gerência padrão definida no Estágio 02
+management_iface: mgmt
+
+# Definição do nó líder para tarefas que rodam uma única vez
+cluster_leader: "{{ groups['all_control'][0] }}"
+
+# Servidores DNS da rede INB
+dns_servers:
+  - 10.20.20.2
+  - 10.20.20.4
+
+###############################################################################
+# 02. STORAGE EXTERNO (DELL EQUALLOGIC ISCSI)
+###############################################################################
+storage_group_ip: "192.168.130.100"
+iqn_prefix: "iqn.2026-02.br.gov.inb"
+
+###############################################################################
+# 03. CREDENCIAIS DE BANCO DE DADOS E MENSAGERIA (BASE)
+###############################################################################
+database_admin_password: "YQPpKbUB3HiCdlu4"
+rabbitmq_password: "tVgSzHuHCydxFIq9"
+pacemaker_user_password: "s6PJHTvYc5rOQUBX"
+
+###############################################################################
+# 04. IDENTITY & ACCESS (KEYSTONE)
+###############################################################################
+keystone_admin_password: "FCrBQ4HDNOpgtmHz"
+metadata_secret: "XXGSWAHMNC2aKqNn"
+
+# Configurações de Integração com Active Directory (AD INB)
+ldap_url: "ldap://10.20.20.2"
+ldap_user_dn: "CN=authGuest,CN=Users,DC=inb,DC=gov,DC=br"
+ldap_password: "txnjycuL61RfB4jw"
+ldap_suffix: "DC=inb,DC=gov,DC=br"
+
+# Escopo de Busca LDAP
+ldap_user_tree_dn: "OU=Administradores,DC=inb,DC=gov,DC=br"
+ldap_group_tree_dn: "OU=Administradores,DC=inb,DC=gov,DC=br"
+
+# Filtros de Acesso LDAP
+ldap_admin_group: "OpenStack_Admins"
+ldap_user_filter: "(memberOf=CN=OpenStack_Admins,OU=Administradores,DC=inb,DC=gov,DC=br)"
+
+###############################################################################
+# 05. IMAGE SERVICE (GLANCE)
+###############################################################################
+glance_db_password: "klxij34IJDm23fsd"
+glance_keystone_password: "lkcam2MCPm23xm989OIh"
+
+###############################################################################
+# 06. BARE METAL SERVICE (IRONIC)
+###############################################################################
+ironic_db_password: "Sjh#$%yht43n56EKLLbxc"
+ironic_keystone_password: "nSDGFuOxD865dgfx5x657c"
+
+# Chave obrigatória para o loop do Ansible funcionar
+baremetal_nodes:
+  - name: "lamina-14"
+    driver: "idrac"
+    address: "10.25.41.24"
+    user: "root"
+    pass: "calvin"
+    macs:
+      - "BC:30:5B:4E:B5:5A"
+      - "BC:30:5B:4E:B5:5B"
+
+  - name: "lamina-15"
+    driver: "idrac"
+    address: "10.25.41.25"
+    user: "root"
+    pass: "calvin"
+    macs:
+      - "BC:30:5B:4E:B5:67"
+      - "BC:30:5B:4E:B5:6A"
+
+  - name: "lamina-16"
+    driver: "idrac"
+    address: "10.25.41.26"
+    user: "root"
+    pass: "calvin"
+    macs:
+      - "BC:30:5B:4E:B5:74"
+      - "BC:30:5B:4E:B5:77"
+
+# Lâmina HP - Futura expansão (Comentada)
+# - name: "lamina-hp-01"
+#   driver: "ilo"
+#   address: "10.25.41.66"
+#   user: "admin"
+#   pass: "senha_ilo"
+#   macs:
+#     - "XX:XX:XX:XX:XX:XX"
+
+
+# --- MODELO LEGADO (Sem Gerência Remota) ---
+#  - name: "servidor-velho-01"
+#    driver: "wol"       # Identificador para nossa lógica Ansible
+#    address: "0.0.0.0"     # Não possui IP de gerência
+#    macs:
+#      - "11:22:33:44:55:66" # O MAC é vital para o boot via rede (PXE)

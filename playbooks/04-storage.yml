@@ -1,0 +1,6 @@
+---
+- name: "Estágio 04: Infraestrutura de Storage (iSCSI & Multipath)"
+  hosts: all_control
+  become: yes
+  roles:
+    - iscsi_setup
